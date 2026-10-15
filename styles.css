@@ -3188,6 +3188,13 @@ button {
   letter-spacing: 0.04em;
 }
 
+.graph-view-actions > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
 #graph-canvas {
   width: 100%;
   height: 100%;

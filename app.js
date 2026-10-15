@@ -15,6 +15,7 @@
     narrativeStage: 0,
     academicDiscipline: 0,
     graphData: null,
+    graphLoadController: null,
     chinaGeoData: null,
     graphController: null,
     pageCleanup: null,
@@ -356,8 +357,9 @@
               <div id="layer-filters" class="filter-group"><h3>关系层级</h3></div>
               <div id="type-filters" class="filter-group"><h3>实体类型</h3></div>
               <div class="graph-view-actions">
-                <button id="show-overview" class="ghost-button" type="button">查看全部数据</button>
+                <button id="show-overview" class="ghost-button" type="button">数据全览</button>
                 <button id="show-default" class="ghost-button" type="button">聚焦竺可桢</button>
+                <p class="muted">全览展示至少含 5 个实体的关系簇，保留竺可桢关系簇。可通过搜索查看其他实体。</p>
               </div>
             </aside>
             <aside id="graph-detail" class="graph-detail" aria-live="polite">
@@ -386,6 +388,7 @@
   }
 
   function render() {
+    state.graphLoadController?.abort();
     if (state.pageCleanup) {
       state.pageCleanup();
       state.pageCleanup = null;
@@ -708,21 +711,72 @@
     return () => {};
   }
 
+  function decodeGraphData(data) {
+    if (data.format !== "qiushi-graph-v1") throw new Error("图谱数据格式不正确");
+    const nodes = data.nodes.map(([id, label, type, degree, component, componentSize]) => ({
+      id, label, entityType: data.types[type], degree, componentId: data.components[component], componentSize,
+    }));
+    const edges = data.edges.map(([source, target, predicate, layers, rawStart, rawEnd, evidenceCount, isSelfLoop]) => ({
+      source: nodes[source].id, target: nodes[target].id, predicate: data.predicates[predicate],
+      layers: layers.map((index) => data.layers[index]), rawStart, rawEnd, evidenceCount, isSelfLoop: Boolean(isSelfLoop),
+    }));
+    return { canonicalNodeId: data.canonicalNodeId, stats: data.stats, nodes, edges };
+  }
+
   async function initGraph() {
     const loading = document.getElementById("graph-loading");
+    if (!loading) return;
+    state.graphLoadController?.abort();
+    const controller = new AbortController();
+    state.graphLoadController = controller;
+    const isCurrent = () => document.getElementById("graph-loading") === loading && !controller.signal.aborted;
+    loading.className = "graph-loading";
+    loading.textContent = "正在读取图谱数据…";
+    const timeout = window.setTimeout(() => controller.abort(), 45000);
     try {
       if (!state.graphData) {
-        const response = await fetch("assets/data/graph-data.json");
+        const compressed = typeof DecompressionStream !== "undefined";
+        const response = await fetch(`assets/data/graph-runtime.json${compressed ? ".gz" : ""}`, { signal: controller.signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        state.graphData = await response.json();
+        const total = Number(response.headers.get("Content-Length"));
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.byteLength;
+          if (isCurrent()) loading.textContent = `正在读取图谱数据… ${Math.round(received / 1024)} KB${total ? ` / ${Math.round(total / 1024)} KB` : ""}`;
+        }
+        if (!isCurrent()) return;
+        loading.textContent = "正在整理节点与关系…";
+        const blob = new Blob(chunks);
+        const text = compressed
+          ? await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).text()
+          : await blob.text();
+        if (!isCurrent()) return;
+        state.graphData = decodeGraphData(JSON.parse(text));
       }
-      if (state.route !== "graph") return;
-      loading?.remove();
+      if (!isCurrent() || state.route !== "graph") return;
       state.graphController = createGraphController(state.graphData);
+      loading.remove();
     } catch (error) {
-      if (loading) loading.className = "graph-error";
-      if (loading) loading.textContent = `图谱数据加载失败：${error.message}。请通过 start.bat 或本地 HTTP 服务器访问。`;
+      if (document.getElementById("graph-loading") !== loading || state.graphLoadController !== controller) return;
+      loading.className = "graph-error";
+      loading.textContent = error.name === "AbortError"
+        ? "图谱下载超时，请检查网络后重试。"
+        : `图谱加载失败：${error.message}。请检查网络后重试。`;
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "ghost-button";
+      retry.textContent = "重新加载";
+      retry.addEventListener("click", initGraph, { once: true });
+      loading.append(document.createElement("br"), retry);
       console.error(error);
+    } finally {
+      window.clearTimeout(timeout);
+      if (state.graphLoadController === controller) state.graphLoadController = null;
     }
   }
 
@@ -744,6 +798,11 @@
       if (!componentNodeIds.has(componentId)) componentNodeIds.set(componentId, []);
       componentNodeIds.get(componentId).push(node.id);
     });
+    const canonicalComponentId = nodeById.get(data.canonicalNodeId)?.componentId;
+    const overviewNodeIds = data.nodes.filter((node) =>
+      (canonicalComponentId && node.componentId === canonicalComponentId)
+      || (componentNodeIds.get(node.componentId || `component-${node.id}`)?.length || 0) >= 5
+    ).map((node) => node.id);
     data.edges.forEach((edge) => {
       if (!edgesByNode.has(edge.source)) edgesByNode.set(edge.source, []);
       if (!edgesByNode.has(edge.target)) edgesByNode.set(edge.target, []);
@@ -767,7 +826,7 @@
 
     const graph = {
       mode: "overview",
-      focusIds: new Set(data.nodes.map((node) => node.id)),
+      focusIds: new Set(overviewNodeIds),
       focusCenter: data.canonicalNodeId,
       selectedId: data.canonicalNodeId,
       selectedLayers: new Set(layerNames),
@@ -945,7 +1004,7 @@
       const nodes = visibleNodes();
       const nodeIds = new Set(nodes.map((node) => node.id));
       const edges = visibleEdges(nodeIds);
-      const scopeTitle = graph.mode === "overview" ? "全库关系全景" : "真实关系簇";
+      const scopeTitle = graph.mode === "overview" ? "数据全览" : "真实关系簇";
       const scopeDescription = `呈现 ${numberFormatter.format(nodes.length)} 个实体 · ${numberFormatter.format(edges.length)} 条关系`;
       if (scope && (scope.dataset.title !== scopeTitle || scope.dataset.description !== scopeDescription)) {
         scope.dataset.title = scopeTitle;
@@ -1012,7 +1071,7 @@
     function showEvidence(edge) {
       const evidence = document.getElementById("evidence-detail");
       if (!evidence) return;
-      const sourceCount = (edge.evidenceLinkIds?.length || 0) + (edge.passageIds?.length || 0);
+      const sourceCount = edge.evidenceCount ?? ((edge.evidenceLinkIds?.length || 0) + (edge.passageIds?.length || 0));
       evidence.innerHTML = `
         <div class="evidence-box">
           <strong>关系说明</strong>
@@ -1076,7 +1135,7 @@
 
     function resetOverview() {
       graph.mode = "overview";
-      graph.focusIds = new Set(data.nodes.map((node) => node.id));
+      graph.focusIds = new Set(overviewNodeIds);
       graph.focusCenter = data.canonicalNodeId;
       layout();
       selectNode(data.canonicalNodeId);

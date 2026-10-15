@@ -62,6 +62,9 @@ landingpage/
 
 - 原生 HTML、CSS、JavaScript，无 npm 或第三方前端运行依赖。
 - 知识图谱使用 Canvas 渲染，数据位于 `assets/data/graph-data.json`。
+- 在线图谱优先读取约 0.8 MB 的压缩展示数据 `assets/data/graph-runtime.json.gz`；不支持浏览器解压时读取 `graph-runtime.json`。全部节点、关系和页面使用的信息均保留，完整研究源数据不变。
+- 数据全览展示至少包含 5 个实体的关系簇，并始终保留竺可桢所在关系簇；搜索与节点聚焦仍使用完整数据。“聚焦竺可桢”可直接查看其关系网络。
+- 修改图谱源数据后，运行 `node scripts/build-graph-data.cjs` 重新生成这两份展示数据并一并提交。Node.js 仅用于重新生成数据，浏览网站及本地预览不需要安装。
 - 生平地图使用本地 GeoJSON，数据位于 `assets/data/china-provinces.geojson`。
 - 页面中的史料链接需要联网访问；本地交互与主要数据展示不依赖外部接口。
 
